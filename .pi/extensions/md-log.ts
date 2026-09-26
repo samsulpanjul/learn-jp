@@ -25,7 +25,8 @@
  * .md-link extension this was modeled on).
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { activeStudy } from "../lib/study-context.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -33,17 +34,21 @@ const QA_TOOLS = new Set(["quiz", "ask_user_question"]);
 
 export default function mdLog(pi: ExtensionAPI) {
 	let logFile: string | null = null;
+	pi.events.on("md-log:active-request", data => {
+		(data as { reply: (value: boolean) => void }).reply(logFile !== null);
+	});
 
 	// --- State restoration on session restart ---
 
 	pi.on("session_start", async (_event, ctx) => {
+		logFile = null;
 		let lastLinkData: { file: string | null } | undefined;
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (entry.type === "custom" && entry.customType === "md-log") {
 				lastLinkData = entry.data as { file: string | null } | undefined;
 			}
 		}
-		if (lastLinkData?.file) {
+		if (lastLinkData?.file && !activeStudy(pi) && fs.existsSync(lastLinkData.file)) {
 			logFile = lastLinkData.file;
 			const theme = ctx.ui.theme;
 			ctx.ui.setStatus(
@@ -67,16 +72,17 @@ export default function mdLog(pi: ExtensionAPI) {
 
 	function appendToFile(text: string): void {
 		if (!logFile) return;
+		const fd = fs.openSync(logFile, "r+");
 		try {
-			let current = "";
-			if (fs.existsSync(logFile)) {
-				current = fs.readFileSync(logFile, "utf-8");
+			const size = fs.fstatSync(fd).size;
+			const bytes = Buffer.from(`${size ? "\n\n" : ""}${text}\n`, "utf8");
+			let written = 0;
+			while (written < bytes.length) {
+				const count = fs.writeSync(fd, bytes, written, bytes.length - written, size + written);
+				if (!count) throw new Error("Markdown append did not complete.");
+				written += count;
 			}
-			const prefix = current.trim().length > 0 ? "\n\n" : "";
-			fs.writeFileSync(logFile, current + prefix + text + "\n", "utf-8");
-		} catch {
-			// File may have been deleted externally; ignore.
-		}
+		} finally { fs.closeSync(fd); }
 	}
 
 	// --- Formatting ---
@@ -281,7 +287,8 @@ export default function mdLog(pi: ExtensionAPI) {
 	pi.registerCommand("md-log", {
 		description: "Mirror the session to a markdown file (backfills history)",
 		handler: async (args, ctx: any) => {
-			const filepath = args.trim();
+			if (activeStudy(pi)) { ctx.ui.notify("Stop the active study log before using /md-log.", "warning"); return; }
+			const filepath = args.trim().replace(/^(["'])(.*)\1$/, "$2");
 			if (!filepath) {
 				ctx.ui.notify("Usage: /md-log <filepath>", "warning");
 				return;
@@ -306,17 +313,22 @@ export default function mdLog(pi: ExtensionAPI) {
 			}
 
 			logFile = resolved;
+			// Preserve existing notes: history is appended, never substituted.
+			let written: number;
+			try { written = backfill(ctx); }
+			catch (error) {
+				logFile = null;
+				ctx.ui.notify(`Could not link Markdown log: ${String(error)}`, "error");
+				return;
+			}
 			pi.appendEntry("md-log", { file: resolved });
-
-			// Backfill the active branch.
-			const written = backfill(ctx);
 
 			const theme = ctx.ui.theme;
 			ctx.ui.setStatus(
 				"md-log",
 				theme.fg("accent", "🗒 ") + theme.fg("dim", path.basename(resolved)),
 			);
-			ctx.ui.notify(`Linked: ${resolved} (${written} entries backfilled)`, "success");
+			ctx.ui.notify(`Linked: ${resolved} (${written} entries appended)`, "info");
 		},
 	});
 
@@ -432,11 +444,7 @@ export default function mdLog(pi: ExtensionAPI) {
 		}
 
 		if (blocks.length > 0) {
-			try {
-				fs.writeFileSync(logFile, blocks.join("\n\n") + "\n", "utf-8");
-			} catch {
-				// ignore
-			}
+			appendToFile(blocks.join("\n\n"));
 		}
 		return count;
 	}
