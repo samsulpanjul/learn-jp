@@ -63,9 +63,10 @@ export default function questions(pi: ExtensionAPI) {
 				if (signal?.aborted) throw new Error("Question cancelled before display.");
 				session.busy = true;
 				try {
+					const questionNumber = session.questions.length + 1;
 					const captured: CapturedQuestion = { id: _id, kind: input.kind, question, options, pieces, askedAt: new Date().toISOString(), status: "pending" };
 					const choices = input.kind === "multiple_choice" ? options.map((text, i) => `${"ABCD"[i]}. ${text}`) : input.kind === "sentence_order" ? pieces.map((text, i) => `${"ABCDEFGH"[i]}. ${text}`) : ["Enter answer"];
-					session.append(callout("question", `Question ${session.questions.length + 1} [${_id}] — ${captured.askedAt}`, [question, ...choices, "I don't know"].join("\n")));
+					session.append(callout("question", `Question ${questionNumber} — ${captured.askedAt}`, [question, ...choices, "I don't know"].join("\n")));
 					session.questions.push(captured);
 					const result = input.kind === "multiple_choice"
 						? await askMultipleChoice(ctx, question, options)
@@ -77,7 +78,7 @@ export default function questions(pi: ExtensionAPI) {
 					try {
 						sameStudy(pi, session);
 						const answer = result.status === "cancelled" ? "(cancelled)" : "order" in result ? `Order: ${(result.order as number[]).join(" → ")}\n${result.answer}` : result.answer;
-						session.append(callout("example", `Answer [${_id}] — ${captured.answeredAt}`, answer));
+						session.append(callout("example", `Answer ${questionNumber} — ${captured.answeredAt}`, answer));
 					} catch (error) {
 						session.fail(error);
 						throw new Error(`${String(error)}\nSubmitted response (not safely logged): ${JSON.stringify(result)}`);
